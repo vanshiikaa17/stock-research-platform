@@ -1,0 +1,10 @@
+yfinance
+pandas
+requests
+python-dotenv
+fastapi
+uvicorn
+anthropic
+pandas-ta
+beautifulsoup4
+httpx
