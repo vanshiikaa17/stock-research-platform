@@ -18,7 +18,7 @@ Always help the user understand what sector dynamics mean for the stock they're 
 # Used as fallback AND as the peer discovery pool
 NSE_UNIVERSE = {
     "Banks - Regional": [
-        "RBLBANK.NS", "DCBBANK.NS", "FEDERALBNK.NS", "KARNATAKBAN.NS",
+        "RBLBANK.NS", "DCBBANK.NS", "FEDERALBNK.NS",
         "CSBBANK.NS", "UJJIVANSFB.NS", "EQUITASBNK.NS", "SURYODAY.NS"
     ],
     "Banks - Large": [
