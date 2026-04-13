@@ -1,36 +1,39 @@
 """
 api/main.py — FastAPI backend for the Stock Research Platform.
+Stateless — all report generation is in-memory, nothing written to disk.
 
 Endpoints:
-  GET /analyse/{company}   → full research report (accepts company name or ticker)
-  GET /resolve/{company}   → resolve name to ticker only (for autocomplete)
-  GET /signal/{company}    → composite signal score only (for watchlist)
-  GET /report/markdown/{ticker} → latest saved Markdown report
+  GET /analyse/{company}    → full JSON research report
+  GET /analyse/{company}/markdown  → Markdown version (for preview/email)
+  GET /resolve/{company}    → resolve name to ticker only (autocomplete)
+  GET /signal/{company}     → composite signal score only (watchlist)
+  GET /health               → health check
 """
+
+import sys
+import os
+import time
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-import time
-import os
-import sys
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.orchestrator import orchestrate
 from agents.resolver import resolve_ticker
-from reports.report_generator import generate_report
+from reports.report_generator import generate_report, build_pdf_bytes
 
-# ── App setup ─────────────────────────────────────────────────────────────────
+#  App 
 
 app = FastAPI(
-    title="Stock Research Platform API",
+    title="Stock Research Platform",
     description=(
-        "AI-powered stock research for Indian retail investors (NSE/BSE). "
-        "Pass a company name — no ticker knowledge required. "
-        "Educational use only — not investment advice."
+        "AI-powered stock research for Indian retail investors. "
+        "Pass a company name — no ticker knowledge needed. "
+        "Stateless, in-memory pipeline. Educational use only."
     ),
-    version="1.0.0",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -42,14 +45,23 @@ app.add_middleware(
 )
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _run_research(company: str, prompt: str = "") -> dict:
+    """Shared logic — resolve + orchestrate + generate report."""
+    result = orchestrate(company, user_prompt=prompt)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return generate_report(result)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {
         "service": "Stock Research Platform",
-        "status":  "running",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "docs":    "/docs",
         "example": "/analyse/Reliance Industries",
     }
@@ -63,56 +75,73 @@ def health():
 @app.get("/resolve/{company:path}")
 def resolve(company: str):
     """
-    Resolves a company name to its NSE/BSE ticker — without running full research.
-    Great for autocomplete or ticker preview in the frontend.
-
-    Examples:
-    - `/resolve/HDFC Bank`          → `{ ticker: "HDFCBANK.NS", strategy: "alias" }`
-    - `/resolve/Tata Consultancy`   → `{ ticker: "TCS.NS", ... }`
-    - `/resolve/RELIANCE.NS`        → passes through as-is
+    Resolves a company name → NSE/BSE ticker without running research.
+    Fast — use for autocomplete or ticker preview in the frontend.
     """
-    company = company.strip()
-    if not company:
-        raise HTTPException(status_code=400, detail="Company name is required.")
-
-    result = resolve_ticker(company)
+    result = resolve_ticker(company.strip())
     if not result["ticker"]:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+@app.get("/analyse/{company:path}/markdown", response_class=PlainTextResponse)
+def analyse_markdown(
+    company: str,
+    prompt: str = Query(default=""),
+):
+    """Returns the report as plain Markdown text — useful for preview or email."""
+    try:
+        bundle = _run_research(company.strip(), prompt)
+        return bundle["markdown"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analyse/{company:path}/pdf")
+def analyse_pdf(
+    company: str,
+    prompt: str = Query(default=""),
+):
+    """
+    Returns the report as a PDF binary stream.
+    Pro-tier feature — requires weasyprint installed.
+    TODO: gate behind subscription check before enabling publicly.
+    """
+    try:
+        bundle   = _run_research(company.strip(), prompt)
+        pdf_bytes = build_pdf_bytes(bundle["json_report"])
+        filename  = f"{bundle['json_report']['meta']['ticker']}_report.pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/analyse/{company:path}")
 def analyse(
     company: str,
     prompt: str = Query(default="", description="Optional custom research question"),
-    save:   bool = Query(default=False, description="Persist report files to disk"),
 ):
     """
-    Main endpoint — accepts a **company name** (or ticker) and returns a full research report.
+    Main endpoint — accepts a company name (or ticker) and returns a full research report.
 
-    **company** examples:
-    - `Reliance Industries`
-    - `HDFC Bank`
-    - `Zomato`
-    - `tcs`  (case-insensitive)
-    - `INFY.NS`  (raw ticker also works)
-
-    **prompt** (optional): Ask a specific question, e.g. `Is the debt level a concern?`
+    Examples:
+    - /analyse/Reliance Industries
+    - /analyse/HDFC Bank?prompt=Is the debt level a concern?
+    - /analyse/INFY.NS
     """
-    company = company.strip()
-    if not company:
-        raise HTTPException(status_code=400, detail="Company name is required.")
-
     try:
-        # Orchestrator handles name resolution + all 4 agents in parallel
-        result = orchestrate(company, user_prompt=prompt)
-
-        if result.get("error"):
-            raise HTTPException(status_code=404, detail=result["error"])
-
-        report_bundle = generate_report(result, save=save, pdf=False)
-        return JSONResponse(content=report_bundle["json_report"])
-
+        bundle = _run_research(company.strip(), prompt)
+        return JSONResponse(content=bundle["json_report"])
     except HTTPException:
         raise
     except Exception as e:
@@ -122,15 +151,10 @@ def analyse(
 @app.get("/signal/{company:path}")
 def quick_signal(company: str):
     """
-    Lightweight endpoint — returns ONLY the composite signal score.
-    Useful for watchlist dashboards (much faster than /analyse).
-
-    Example: `/signal/Infosys` → `{ ticker, company, signal }`
+    Returns ONLY the composite signal score — no full report generated.
+    Much faster than /analyse. Use for watchlist dashboards.
     """
-    company = company.strip()
-
-    # Step 1: resolve name → ticker
-    resolution = resolve_ticker(company)
+    resolution = resolve_ticker(company.strip())
     if not resolution["ticker"]:
         raise HTTPException(status_code=404, detail=resolution["error"])
 
@@ -139,21 +163,21 @@ def quick_signal(company: str):
     try:
         from agents.orchestrator import (
             run_all_agents, score_fundamentals, score_sentiment,
-            score_sector, combined_signal
+            score_sector, combined_signal,
         )
 
-        agents = run_all_agents(ticker)
-
+        agents       = run_all_agents(ticker)
         tech_score   = agents.get("technicals",   {}).get("score", 0)
         fund_raw     = agents.get("fundamentals", {}).get("raw", {})
         sent_text    = agents.get("sentiment",    {}).get("analysis", "")
         sector_raw   = agents.get("sector",       {}).get("raw", {})
 
-        fund_score   = score_fundamentals(fund_raw)
-        sent_score   = score_sentiment(sent_text)
-        sector_score = score_sector(sector_raw)
-
-        signal = combined_signal(tech_score, fund_score, sent_score, sector_score)
+        signal = combined_signal(
+            tech_score,
+            score_fundamentals(fund_raw),
+            score_sentiment(sent_text),
+            score_sector(sector_raw),
+        )
 
         return {
             "input":      company,
@@ -164,33 +188,6 @@ def quick_signal(company: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
 
-
-@app.get("/report/markdown/{ticker}")
-def report_markdown(ticker: str):
-    """
-    Serves the latest saved Markdown report for a ticker.
-    Only available if `save=true` was used in /analyse.
-    """
-    ticker_clean = ticker.upper().replace(".", "_")
-    output_dir   = "reports/output"
-
-    if not os.path.exists(output_dir):
-        raise HTTPException(status_code=404, detail="No reports saved yet.")
-
-    files = sorted(
-        [f for f in os.listdir(output_dir)
-         if f.startswith(ticker_clean) and f.endswith(".md")],
-        reverse=True
-    )
-    if not files:
-        raise HTTPException(status_code=404, detail=f"No saved report for {ticker}.")
-
-    path = os.path.join(output_dir, files[0])
-    return FileResponse(path, media_type="text/markdown", filename=files[0])
-
-
-# ── Dev server ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
+    # test using -  Invoke-RestMethod "http://localhost:8000/analyse/eternal?prompt=is%20debt%20level%20a%20concern%3F"

@@ -335,12 +335,25 @@ Sector: {signal['component_scores']['sector']}/2
 {sect.get('analysis', 'No data available.')}
 """.strip()
 
-    user_msg = user_prompt.strip() if user_prompt else (
-        f"Please write a clear, structured research report on {ticker} for a first-time Indian retail investor. "
-        "Explain what each finding means in simple language. "
-        "Cover: Business overview, Financial health, Technical picture, Market sentiment, Sector standing. "
-        "End with a brief 'Key Takeaways' section. Do NOT give any buy/sell recommendation."
+    # Always produce the full structured report.
+    # If the user asked a specific question, answer it as an additional section
+    # rather than replacing the report — so the response is always complete.
+    base_prompt = (
+        f"Please write a clear, structured research report on {ticker} for a first-time "
+        "Indian retail investor. Explain what each finding means in simple language. "
+        "Cover: Business overview, Financial health, Technical picture, Market sentiment, "
+        "Sector standing. End with a brief 'Key Takeaways' section. "
+        "Do NOT give any buy/sell recommendation."
     )
+
+    if user_prompt.strip():
+        user_msg = (
+            f"{base_prompt}\n\n"
+            f"The user also has a specific question — please address it clearly "
+            f"in a dedicated section called 'Your Question':\n{user_prompt.strip()}"
+        )
+    else:
+        user_msg = base_prompt
 
     print("\n🤖 Synthesising unified report via Groq...")
     response = client.chat.completions.create(
@@ -414,6 +427,7 @@ def orchestrate(company_input: str, user_prompt: str = "") -> dict:
         "ticker":          ticker,
         "company":         company,
         "input_query":     company_input,
+        "user_prompt":     user_prompt.strip(),
         "resolution":      resolution,
         "signal":          signal,
         "agent_results":   agent_results,

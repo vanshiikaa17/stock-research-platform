@@ -1,25 +1,33 @@
 """
-report_generator.py — Formats orchestrator output into structured JSON + Markdown report.
-PDF export is gated behind Pro tier (placeholder hook included).
+report_generator.py — Formats orchestrator output into structured JSON and Markdown.
+
+Purely in-memory — no disk I/O, no local file saving.
+Stateless and horizontally scalable by design.
+
+Storage (PDF persistence, report history) is handled at the API layer
+via Supabase when Pro tier is implemented.
 """
 
-import json
-import os
-from datetime import datetime
-from pathlib import Path
+import math
+from datetime import datetime, timezone
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _safe(val, fallback="N/A"):
-    if val is None or val == "" or val != val:  # NaN check
+    if val is None or val == "":
         return fallback
+    try:
+        if math.isnan(float(val)):
+            return fallback
+    except (TypeError, ValueError):
+        pass
     return val
 
 
 def _fmt_pct(val):
     try:
-        return f"{float(val)*100:.1f}%"
+        return f"{float(val) * 100:.1f}%"
     except (TypeError, ValueError):
         return "N/A"
 
@@ -31,95 +39,93 @@ def _fmt_num(val, decimals=2):
         return "N/A"
 
 
-# ── Structured JSON report ────────────────────────────────────────────────────
+# ── JSON report ───────────────────────────────────────────────────────────────
 
 def build_json_report(orchestrator_result: dict) -> dict:
     """
     Converts raw orchestrator output into a clean, frontend-ready JSON structure.
-    This is what the FastAPI endpoint will return.
+    This is what the FastAPI endpoint returns directly — nothing touches disk.
     """
-    ticker   = orchestrator_result.get("ticker", "")
-    company  = orchestrator_result.get("company", ticker)
-    signal   = orchestrator_result.get("signal", {})
-    agents   = orchestrator_result.get("agent_results", {})
-    report   = orchestrator_result.get("unified_report", "")
-    elapsed  = orchestrator_result.get("elapsed_seconds", 0)
+    ticker  = orchestrator_result.get("ticker", "")
+    company = orchestrator_result.get("company", ticker)
+    signal  = orchestrator_result.get("signal", {})
+    agents  = orchestrator_result.get("agent_results", {})
+    report  = orchestrator_result.get("unified_report", "")
+    elapsed = orchestrator_result.get("elapsed_seconds", 0)
 
-    fund_raw  = agents.get("fundamentals", {}).get("raw", {})
-    tech_raw  = agents.get("technicals",   {}).get("raw", {})
-    sector_raw = agents.get("sector",      {}).get("raw", {})
+    fund_raw   = agents.get("fundamentals", {}).get("raw", {})
+    tech_raw   = agents.get("technicals",   {}).get("raw", {})
+    sector_raw = agents.get("sector",       {}).get("raw", {})
 
-    # ── Fundamental snapshot ──
-    fundamentals_snapshot = {
-        "pe_ratio":         _fmt_num(fund_raw.get("pe_ratio")),
-        "forward_pe":       _fmt_num(fund_raw.get("forward_pe")),
-        "eps":              _fmt_num(fund_raw.get("eps")),
-        "roe":              _fmt_pct(fund_raw.get("roe")),
-        "revenue_growth":   _fmt_pct(fund_raw.get("revenue_growth")),
-        "profit_margin":    _fmt_pct(fund_raw.get("profit_margin")),
-        "debt_to_equity":   _fmt_num(fund_raw.get("debt_to_equity")),
-        "dividend_yield":   _fmt_pct(fund_raw.get("dividend_yield")),
-        "52w_high":         _safe(fund_raw.get("fifty_two_week_high")),
-        "52w_low":          _safe(fund_raw.get("fifty_two_week_low")),
-        "analyst_rating":   _safe(fund_raw.get("analyst_rating")),
-        "sector":           _safe(fund_raw.get("sector")),
+    # ── Fundamentals ──
+    fundamentals = {
+        "pe_ratio":       _fmt_num(fund_raw.get("pe_ratio")),
+        "forward_pe":     _fmt_num(fund_raw.get("forward_pe")),
+        "eps":            _fmt_num(fund_raw.get("eps")),
+        "roe":            _fmt_pct(fund_raw.get("roe")),
+        "revenue_growth": _fmt_pct(fund_raw.get("revenue_growth")),
+        "profit_margin":  _fmt_pct(fund_raw.get("profit_margin")),
+        "debt_to_equity": _fmt_num(fund_raw.get("debt_to_equity")),
+        "dividend_yield": _fmt_pct(fund_raw.get("dividend_yield")),
+        "52w_high":       _safe(fund_raw.get("fifty_two_week_high")),
+        "52w_low":        _safe(fund_raw.get("fifty_two_week_low")),
+        "analyst_rating": _safe(fund_raw.get("analyst_rating")),
+        "sector":         _safe(fund_raw.get("sector")),
     }
 
-    # ── Technical snapshot ──
-    technicals_snapshot = {
-        "rsi_14":           _fmt_num(tech_raw.get("rsi")),
-        "rsi_signal":       _safe(tech_raw.get("rsi_signal")),
-        "macd":             _fmt_num(tech_raw.get("macd")),
-        "macd_signal_line": _fmt_num(tech_raw.get("macd_signal")),
+    # ── Technicals ──
+    technicals = {
+        "current_price":    _safe(tech_raw.get("current_price")),
+        "change_pct":       _safe(tech_raw.get("change_pct")),
+        "rsi_14":           _safe(tech_raw.get("rsi_14")),
+        "rsi_zone":         _safe(tech_raw.get("rsi_zone")),
+        "macd":             _safe(tech_raw.get("macd")),
+        "macd_signal_line": _safe(tech_raw.get("macd_signal")),
         "macd_crossover":   _safe(tech_raw.get("macd_crossover")),
-        "sma_50":           _fmt_num(tech_raw.get("sma_50")),
-        "sma_200":          _fmt_num(tech_raw.get("sma_200")),
+        "sma_50":           _safe(tech_raw.get("sma_50")),
+        "sma_200":          _safe(tech_raw.get("sma_200")),
         "trend":            _safe(tech_raw.get("trend")),
-        "bb_upper":         _fmt_num(tech_raw.get("bb_upper")),
-        "bb_lower":         _fmt_num(tech_raw.get("bb_lower")),
-        "volume_vs_avg":    _safe(tech_raw.get("volume_vs_avg")),
+        "bb_upper":         _safe(tech_raw.get("bb_upper")),
+        "bb_lower":         _safe(tech_raw.get("bb_lower")),
         "signal_score":     _safe(agents.get("technicals", {}).get("score")),
     }
 
-    # ── Sector snapshot ──
-    sector_peers = sector_raw.get("peers", [])[:5]   # top 5 peers for UI
-    sector_snapshot = {
-        "peers": [
-            {
-                "name":       _safe(p.get("name")),
-                "pe":         _fmt_num(p.get("pe")),
-                "net_margin": _fmt_num(p.get("net_margin")),
-                "roe":        _fmt_num(p.get("roe")),
-                "market_cap": _safe(p.get("market_cap")),
-            }
-            for p in sector_peers
-        ]
-    }
-
-    # ── Agent statuses ──
-    agent_statuses = {
-        name: data.get("status", "unknown")
-        for name, data in agents.items()
-    }
+    # ── Sector peers ──
+    peers = [
+        {
+            "name":       _safe(p.get("name")),
+            "pe_ratio":   _fmt_num(p.get("pe_ratio")),
+            "net_margin": _fmt_num(p.get("profit_margins")),
+            "roe":        _fmt_num(p.get("roe")),
+            "market_cap": _safe(p.get("market_cap")),
+        }
+        for p in sector_raw.get("peers", [])[:5]
+    ]
 
     return {
         "meta": {
             "ticker":          ticker,
             "company":         company,
-            "generated_at":    datetime.utcnow().isoformat() + "Z",
+            "input_query":     orchestrator_result.get("input_query", ""),
+            "user_prompt":     orchestrator_result.get("user_prompt", ""),
+            "resolved_via":    orchestrator_result.get("resolution", {}).get("strategy", ""),
+            "generated_at":    datetime.now(timezone.utc).isoformat(),
             "elapsed_seconds": elapsed,
-            "disclaimer":      (
+            "disclaimer": (
                 "This report is generated by AI for educational purposes only. "
-                "It is NOT investment advice. Consult a SEBI-registered investment advisor "
-                "before making any investment decisions."
+                "It is NOT investment advice. Consult a SEBI-registered investment "
+                "advisor before making any investment decisions."
             ),
         },
-        "signal": signal,
-        "fundamentals": fundamentals_snapshot,
-        "technicals": technicals_snapshot,
-        "sector": sector_snapshot,
+        "signal":         signal,
+        "fundamentals":   fundamentals,
+        "technicals":     technicals,
+        "sector":         {"peers": peers},
         "unified_report": report,
-        "agent_statuses": agent_statuses,
+        "agent_statuses": {
+            name: data.get("status", "unknown")
+            for name, data in agents.items()
+        },
     }
 
 
@@ -127,227 +133,132 @@ def build_json_report(orchestrator_result: dict) -> dict:
 
 def build_markdown_report(json_report: dict) -> str:
     """
-    Renders the JSON report as a clean Markdown string.
-    Used for: display in terminal, PDF conversion, future email delivery.
+    Renders the JSON report as a Markdown string.
+    In-memory only — caller decides what to do with it (stream, email, convert to PDF).
     """
     meta  = json_report["meta"]
     sig   = json_report["signal"]
     fund  = json_report["fundamentals"]
     tech  = json_report["technicals"]
-    sect  = json_report["sector"]
+    peers = json_report["sector"]["peers"]
     narr  = json_report["unified_report"]
 
-    signal_emoji = {"green": "🟢", "light-green": "🟡", "yellow": "🟡",
-                    "light-red": "🟠", "red": "🔴"}.get(sig.get("colour", ""), "⚪")
+    emoji = {
+        "green": "🟢", "light-green": "🟡",
+        "yellow": "🟡", "light-red": "🟠", "red": "🔴"
+    }.get(sig.get("colour", ""), "⚪")
+
+    scores = sig.get("component_scores", {})
 
     lines = [
         f"# {meta['company']} ({meta['ticker']}) — Stock Research Report",
-        f"*Generated: {meta['generated_at']} | Powered by AI | For educational use only*",
+        f"*Generated: {meta['generated_at']} | Educational use only*",
         "",
         "---",
-        "",
-        f"## {signal_emoji} Composite Signal: {sig['label']}  _(Score: {sig['composite_score']} / 10)_",
+        f"## {emoji} Composite Signal: {sig['label']}  _(Score: {sig['composite_score']} / 10)_",
         "",
         "| Dimension | Score |",
         "|-----------|-------|",
-        f"| Fundamentals | {sig['component_scores']['fundamentals']} / 5 |",
-        f"| Technicals   | {sig['component_scores']['technicals']} / 5 |",
-        f"| Sentiment    | {sig['component_scores']['sentiment']} / 2 |",
-        f"| Sector       | {sig['component_scores']['sector']} / 2 |",
+        f"| Fundamentals | {scores.get('fundamentals', 'N/A')} / 5 |",
+        f"| Technicals   | {scores.get('technicals', 'N/A')} / 5 |",
+        f"| Sentiment    | {scores.get('sentiment', 'N/A')} / 2 |",
+        f"| Sector       | {scores.get('sector', 'N/A')} / 2 |",
         "",
         "---",
-        "",
-        "## 📋 Fundamentals Snapshot",
+        "## 📋 Fundamentals",
         "",
         "| Metric | Value |",
         "|--------|-------|",
-        f"| Sector | {fund['sector']} |",
-        f"| P/E Ratio | {fund['pe_ratio']} |",
-        f"| Forward P/E | {fund['forward_pe']} |",
-        f"| EPS | {fund['eps']} |",
-        f"| ROE | {fund['roe']} |",
-        f"| Revenue Growth | {fund['revenue_growth']} |",
-        f"| Profit Margin | {fund['profit_margin']} |",
-        f"| Debt / Equity | {fund['debt_to_equity']} |",
-        f"| Dividend Yield | {fund['dividend_yield']} |",
-        f"| 52-Week High | {fund['52w_high']} |",
-        f"| 52-Week Low | {fund['52w_low']} |",
-        f"| Analyst Rating | {fund['analyst_rating']} |",
+        *[f"| {k.replace('_', ' ').title()} | {v} |" for k, v in fund.items()],
         "",
         "---",
+        "## 📈 Technicals",
         "",
-        "## 📈 Technicals Snapshot",
-        "",
-        "| Indicator | Value | Signal |",
-        "|-----------|-------|--------|",
-        f"| RSI (14) | {tech['rsi_14']} | {tech['rsi_signal']} |",
-        f"| MACD | {tech['macd']} | {tech['macd_crossover']} |",
-        f"| SMA 50 | {tech['sma_50']} | — |",
-        f"| SMA 200 | {tech['sma_200']} | — |",
-        f"| Trend | — | {tech['trend']} |",
-        f"| BB Upper | {tech['bb_upper']} | — |",
-        f"| BB Lower | {tech['bb_lower']} | — |",
-        f"| Volume vs 30d Avg | {tech['volume_vs_avg']} | — |",
-        f"| Technical Score | {tech['signal_score']} / 5 | — |",
+        "| Indicator | Value |",
+        "|-----------|-------|",
+        *[f"| {k.replace('_', ' ').title()} | {v} |" for k, v in tech.items()],
         "",
         "---",
-        "",
         "## 🏭 Sector Peers",
         "",
     ]
 
-    if sect["peers"]:
+    if peers:
         lines += [
             "| Company | P/E | Net Margin | ROE | Market Cap |",
             "|---------|-----|-----------|-----|------------|",
+            *[f"| {p['name']} | {p['pe_ratio']} | {p['net_margin']} | {p['roe']} | {p['market_cap']} |"
+              for p in peers],
         ]
-        for p in sect["peers"]:
-            lines.append(
-                f"| {p['name']} | {p['pe']} | {p['net_margin']} | {p['roe']} | {p['market_cap']} |"
-            )
     else:
         lines.append("_Peer data not available._")
 
     lines += [
         "",
         "---",
-        "",
         "## 🤖 AI Research Report",
         "",
         narr,
         "",
         "---",
-        "",
         f"> ⚠️ **Disclaimer:** {meta['disclaimer']}",
     ]
 
     return "\n".join(lines)
 
 
-# ── Save to disk ──────────────────────────────────────────────────────────────
+# ── PDF export (Pro tier — in-memory bytes, no disk write) ────────────────────
 
-def save_report(json_report: dict, output_dir: str = "reports/output") -> dict:
+def build_pdf_bytes(json_report: dict) -> bytes:
     """
-    Saves JSON + Markdown reports to disk.
-    Returns paths to saved files.
-    """
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    ticker = json_report["meta"]["ticker"].replace(".", "_")
-    ts     = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    base   = f"{output_dir}/{ticker}_{ts}"
+    Generates a PDF in-memory and returns raw bytes.
+    Caller streams it to the HTTP response or uploads to Supabase Storage.
 
-    json_path = f"{base}.json"
-    md_path   = f"{base}.md"
-
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(json_report, f, indent=2, ensure_ascii=False)
-
-    md_content = build_markdown_report(json_report)
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    print(f"💾 Saved: {json_path}")
-    print(f"💾 Saved: {md_path}")
-
-    return {"json": json_path, "markdown": md_path}
-
-
-# ── PDF export (Pro tier) ─────────────────────────────────────────────────────
-
-def export_pdf(json_report: dict, output_dir: str = "reports/output") -> str:
-    """
-    Exports report as PDF. Requires 'weasyprint' (pip install weasyprint).
-    This is a Pro-tier feature — call this only after verifying subscription.
+    Requires: pip install weasyprint
+    Pro-tier feature — call only after verifying subscription.
     """
     try:
         from weasyprint import HTML
     except ImportError:
         raise RuntimeError(
-            "PDF export requires weasyprint. Install it with: pip install weasyprint\n"
-            "Note: This is a Pro-tier feature."
+            "PDF export requires weasyprint. Install with: pip install weasyprint\n"
+            "This is a Pro-tier feature."
         )
 
-    md = build_markdown_report(json_report)
-    ticker = json_report["meta"]["ticker"].replace(".", "_")
-    ts     = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    pdf_path = f"{output_dir}/{ticker}_{ts}.pdf"
+    md   = build_markdown_report(json_report)
+    meta = json_report["meta"]
 
-    # Minimal HTML wrapper for weasyprint
-    html_content = f"""
-    <html><head>
-    <meta charset="utf-8">
-    <style>
+    html = f"""
+    <html><head><meta charset="utf-8"><style>
       body {{ font-family: Arial, sans-serif; font-size: 13px; padding: 40px; color: #222; }}
-      h1 {{ color: #1a1a2e; }} h2 {{ color: #16213e; border-bottom: 1px solid #ccc; }}
+      h1 {{ color: #1a1a2e; }} h2 {{ color: #16213e; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
       table {{ border-collapse: collapse; width: 100%; margin-bottom: 16px; }}
-      th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left; }}
+      th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 12px; }}
       th {{ background: #f0f0f0; }}
-      blockquote {{ background: #fff8e1; border-left: 4px solid #f39c12; padding: 10px 16px; }}
-    </style>
-    </head><body>
-    <pre style="white-space:pre-wrap;font-family:inherit">{md}</pre>
-    </body></html>
+      blockquote {{ background: #fff8e1; border-left: 4px solid #f39c12; padding: 10px 16px; margin: 0; }}
+      pre {{ white-space: pre-wrap; font-family: inherit; }}
+    </style></head>
+    <body><pre>{md}</pre></body></html>
     """
-    HTML(string=html_content).write_pdf(pdf_path)
-    print(f"📄 PDF saved: {pdf_path}")
-    return pdf_path
+
+    # write_pdf() with no path arg returns bytes directly
+    return HTML(string=html).write_pdf()
 
 
-# ── Convenience wrapper ───────────────────────────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
-def generate_report(orchestrator_result: dict, save: bool = True, pdf: bool = False) -> dict:
+def generate_report(orchestrator_result: dict) -> dict:
     """
-    Main entry point.
-    Converts orchestrator output → JSON report → optionally saves files.
-    Returns: { json_report, markdown, saved_paths (if save=True) }
+    Converts orchestrator output → structured report. Purely in-memory.
+
+    Returns:
+        {
+            "json_report": dict,      # returned by API endpoint
+            "markdown":    str,       # for streaming or email
+        }
+
+    PDF bytes are generated separately via build_pdf_bytes() only on Pro tier.
     """
     json_report = build_json_report(orchestrator_result)
     markdown    = build_markdown_report(json_report)
-
-    result = {"json_report": json_report, "markdown": markdown}
-
-    if save:
-        result["saved_paths"] = save_report(json_report)
-
-    if pdf:
-        result["pdf_path"] = export_pdf(json_report)
-
-    return result
-
-
-# ── CLI test ──────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # Quick smoke test with mock orchestrator output
-    mock_result = {
-        "ticker": "TEST.NS",
-        "company": "Test Corp Ltd",
-        "elapsed_seconds": 12.3,
-        "signal": {
-            "composite_score": 3.2,
-            "label": "Mildly Positive",
-            "colour": "light-green",
-            "component_scores": {
-                "fundamentals": 2,
-                "technicals": 3,
-                "sentiment": 1,
-                "sector": 1,
-            }
-        },
-        "agent_results": {
-            "fundamentals": {"status": "ok", "raw": {"pe_ratio": 22.5, "roe": 0.18,
-                "sector": "Technology", "analyst_rating": "Buy",
-                "fifty_two_week_high": 1500, "fifty_two_week_low": 900}, "analysis": "Strong fundamentals."},
-            "technicals":   {"status": "ok", "raw": {"rsi": 58, "rsi_signal": "Mildly bullish",
-                "macd": 1.2, "macd_signal": 0.8, "macd_crossover": "Bullish",
-                "sma_50": 1200, "sma_200": 1100, "trend": "Uptrend (Golden cross)",
-                "bb_upper": 1450, "bb_lower": 1050, "volume_vs_avg": "Above average"}, "score": 3},
-            "sentiment":    {"status": "ok", "analysis": "Overall positive news flow."},
-            "sector":       {"status": "ok", "raw": {"peers": [], "target_stock": {}}, "analysis": "Sector performing well."},
-        },
-        "unified_report": "This is a placeholder unified report for testing purposes.",
-    }
-
-    result = generate_report(mock_result, save=False)
-    print(result["markdown"][:500])
-    print("\n✅ report_generator.py smoke test passed.")
+    return {"json_report": json_report, "markdown": markdown}
